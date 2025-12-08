@@ -1,0 +1,1 @@
+savedcmd_/home/ubuntu/workspace/my_project/lect10/hello.mod := printf '%s\n'   hello.o | awk '!x[$$0]++ { print("/home/ubuntu/workspace/my_project/lect10/"$$0) }' > /home/ubuntu/workspace/my_project/lect10/hello.mod
