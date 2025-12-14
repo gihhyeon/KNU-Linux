@@ -19,7 +19,7 @@ int main(int argc, char *argv[])
 		printf("PGRP of parent = %d\n", getpgrp());
 
 		sleep(5);
-		kill(-getpid(), 9);
+		kill(pid, 9);
 
 		printf("[%d] Child %d is terminated \n", getpid(), pid);
 		printf("\t...with status %d \n", status >> 8);

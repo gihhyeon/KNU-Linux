@@ -8,11 +8,11 @@ int main() {
 	pid1 = fork();
 	if (pid1 == 0) { // 자식 프로세스
 		printf("[Child1]: Hello, world! pid=%d\n", getpid());
-		exit(0);
+	//	exit(0);
 	}
 	pid2 = fork();
 	if (pid2 == 0) {
 	 	printf("[Child2]: Hello, world! pid=%d\n", getpid());
-		exit(0);
+	//	exit(0);
 	}
 }
