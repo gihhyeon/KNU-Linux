@@ -23,9 +23,10 @@ typedef struct {
     ProcessState state;
     int          remainingTimeQuantum;
     int          wakeUpTick;                    // sleeping -> ready로 돌아올 tick
+
     // readyQueue 체류 시간 측정을 위한 필드
     int          isInReadyQueue;                // readyQueue에 실제로 들어가 있는지 여부(중복 enqueue 방지)
-    long         readyQueueEnterTick;           // readyQueue에 들어간 시점(tick)
+    long         readyQueueEnterTick;           // readyQueue에 "이번에" 들어간 시점(tick)
     long         totalReadyQueueWaitingTicks;   // readyQueue에서 기다린 시간 누적
 } ProcessControlBlock;
 
@@ -204,14 +205,12 @@ static void enqueueToReadyQueue(IndexQueue *readyQueue,
                                 ProcessControlBlock processTable[],
                                 int pcbIndex,
                                 long currentTick) {
-    // readyQueue에 들어가는 순간만 기록
-    if (processTable[pcbIndex].isInReadyQueue) {
-        // 중복 enqueue 방지
-        return;
-    }
+    // 중복 enqueue 방지
+    if (processTable[pcbIndex].isInReadyQueue) return;
 
     processTable[pcbIndex].isInReadyQueue = 1;
     processTable[pcbIndex].readyQueueEnterTick = currentTick;
+
     enqueueIndex(readyQueue, pcbIndex);
 }
 
@@ -219,10 +218,7 @@ static void onDequeuedFromReadyQueue(ProcessControlBlock processTable[],
                                      int pcbIndex,
                                      long currentTick) {
     // readyQueue에서 나오는 순간, 체류 시간을 누적
-    if (!processTable[pcbIndex].isInReadyQueue) {
-        // 방어적 처리(정상적으로는 발생하면 안 됨)
-        return;
-    }
+    if (!processTable[pcbIndex].isInReadyQueue) return;
 
     long waitedTicks = currentTick - processTable[pcbIndex].readyQueueEnterTick;
     if (waitedTicks < 0) waitedTicks = 0;
@@ -236,20 +232,16 @@ static void moveZeroQuantumQueueToReadyQueue(IndexQueue *zeroQuantumQueue,
                                              IndexQueue *readyQueue,
                                              ProcessControlBlock processTable[],
                                              long currentTick) {
-    // 순서 유지가 중요하므로 FIFO 그대로 dequeue -> enqueue 하되,
-    // readyQueue에 들어가는 순간(currentTick)을 enterTick으로 기록한다.
     while (!isQueueEmpty(zeroQuantumQueue)) {
         int pcbIndex = dequeueIndex(zeroQuantumQueue);
         if (processTable[pcbIndex].state == PROCESS_READY &&
             processTable[pcbIndex].remainingTimeQuantum > 0) {
             enqueueToReadyQueue(readyQueue, processTable, pcbIndex, currentTick);
-        } else {
-            // 상태가 예상과 다르면 무시(방어)
         }
     }
 }
 
-// main (parent scheduler)
+// main
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <TIME_QUANTUM> [TICK_USEC=100000] [SEED]\n", argv[0]);
@@ -342,6 +334,10 @@ int main(int argc, char *argv[]) {
     int currentlyRunningIndex = -1;
     long currentTick = 0;
 
+    // 문맥 교환 횟수(프로세스 A -> B로 바뀐 횟수)
+    long totalContextSwitches = 0;
+    int lastCpuOwnerIndex = -1; // 직전에 CPU를 사용하던 프로세스(초기: 없음)
+
     while (isAnyProcessAlive(processTable) && !stopScheduler) {
         /* sleepingQueue에서 깨어날 프로세스 -> readyQueue 또는 zeroQuantumQueue */
         while (!isWakeUpHeapEmpty(&sleepingQueue)) {
@@ -367,7 +363,6 @@ int main(int argc, char *argv[]) {
                     processTable[i].remainingTimeQuantum = initialTimeQuantum;
                 }
             }
-            // zeroQuantumQueue에 있던 READY 프로세스들은 readyQueue로 이동(순서 유지)
             moveZeroQuantumQueueToReadyQueue(&zeroQuantumQueue, &readyQueue, processTable, currentTick);
         }
 
@@ -381,11 +376,21 @@ int main(int argc, char *argv[]) {
 
                 if (processTable[candidateIndex].state == PROCESS_READY &&
                     processTable[candidateIndex].remainingTimeQuantum > 0) {
+
+                    // Context Switch 기록(프로세스 A -> B)
+                    // 초기 첫 디스패치(lastCpuOwnerIndex == -1)는 제외
+                    if (lastCpuOwnerIndex != -1 && lastCpuOwnerIndex != candidateIndex) {
+                        totalContextSwitches++;
+                    }
+
                     currentlyRunningIndex = candidateIndex;
                     processTable[candidateIndex].state = PROCESS_RUNNING;
+
+                    // 새로 CPU를 주는 대상이 확정되었으니 lastCpuOwner 갱신
+                    lastCpuOwnerIndex = candidateIndex;
+
                     break;
                 } else {
-                    // 조건이 맞지 않으면 적절한 큐로 다시 보냄
                     if (processTable[candidateIndex].state == PROCESS_READY &&
                         processTable[candidateIndex].remainingTimeQuantum == 0) {
                         enqueueIndex(&zeroQuantumQueue, candidateIndex);
@@ -413,7 +418,6 @@ int main(int argc, char *argv[]) {
                     processTable[exitedIndex].state = PROCESS_DONE;
                     if (currentlyRunningIndex == exitedIndex) currentlyRunningIndex = -1;
 
-                    // 혹시 예외적으로 readyQueue에 있었다면 플래그 정리
                     processTable[exitedIndex].isInReadyQueue = 0;
                 }
             }
@@ -436,14 +440,12 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* 타임퀀텀 0이면 zeroQuantumQueue로, 아니면 계속 실행 */
+        /* 타임퀀텀 0이면 zeroQuantumQueue로 */
         if (currentlyRunningIndex != -1) {
             if (processTable[currentlyRunningIndex].remainingTimeQuantum <= 0) {
                 processTable[currentlyRunningIndex].state = PROCESS_READY;
                 enqueueIndex(&zeroQuantumQueue, currentlyRunningIndex);
                 currentlyRunningIndex = -1;
-            } else {
-                // 계속 RUNNING 유지
             }
         }
 
@@ -462,26 +464,30 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "\n[Stopped by SIGINT]\n");
     }
 
-    /* 결과: 평균 readyQueue 체류시간 */
-    long totalWaitingTicksAllProcesses = 0;
+    /* 결과 집계: 평균 readyQueue 체류시간 */
+    long totalWaitingTicksAll = 0;
+    long totalWaitingTicksFinished = 0;
     int finishedProcessCount = 0;
 
     for (int i = 0; i < CHILD_PROCESS_COUNT; i++) {
-        totalWaitingTicksAllProcesses += processTable[i].totalReadyQueueWaitingTicks;
-        if (processTable[i].state == PROCESS_DONE) finishedProcessCount++;
+        totalWaitingTicksAll += processTable[i].totalReadyQueueWaitingTicks;
+
+        if (processTable[i].state == PROCESS_DONE) {
+            finishedProcessCount++;
+            totalWaitingTicksFinished += processTable[i].totalReadyQueueWaitingTicks;
+        }
     }
 
-    // 일반적으로는 모두 DONE이지만, 중단/예외 상황 대비로 둘 다 출력
     double averageWaitingTicksAll =
-        (double)totalWaitingTicksAllProcesses / (double)CHILD_PROCESS_COUNT;
+        (double)totalWaitingTicksAll / (double)CHILD_PROCESS_COUNT;
 
     double averageWaitingTicksFinishedOnly =
         (finishedProcessCount > 0)
-            ? (double)totalWaitingTicksAllProcesses / (double)finishedProcessCount
+            ? (double)totalWaitingTicksFinished / (double)finishedProcessCount
             : 0.0;
 
-    printf("TIME_QUANTUM=%d, TICK_USEC=%d, totalTicks=%ld\n",
-           initialTimeQuantum, tickIntervalUsec, currentTick);
+    printf("TIME_QUANTUM=%d, TICK_USEC=%d, SEED=%u, totalTicks=%ld\n",
+           initialTimeQuantum, tickIntervalUsec, seed, currentTick);
 
     printf("Average READY-QUEUE waiting time (ticks) [all %d]: %.2f\n",
            CHILD_PROCESS_COUNT, averageWaitingTicksAll);
@@ -489,13 +495,16 @@ int main(int argc, char *argv[]) {
     printf("Average READY-QUEUE waiting time (ticks) [finished %d]: %.2f\n",
            finishedProcessCount, averageWaitingTicksFinishedOnly);
 
+    printf("Total Context Switches (process->process): %ld\n", totalContextSwitches);
+
     for (int i = 0; i < CHILD_PROCESS_COUNT; i++) {
-        printf("Process[%02d] pid=%d readyQueueWait=%ld ticks state=%d\n",
+        printf("Process[%02d] pid=%d state=%d | readyQueueWait=%ld\n",
                i,
                (int)processTable[i].processId,
-               processTable[i].totalReadyQueueWaitingTicks,
-               (int)processTable[i].state);
+               (int)processTable[i].state,
+               processTable[i].totalReadyQueueWaitingTicks);
     }
 
     return 0;
 }
+
